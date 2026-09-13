@@ -25,6 +25,9 @@ local marketCatalogReady = false
 local marketCatalogBuilding = false
 local marketCatalogEvent = nil
 local marketCatalogGeneration = 0
+local cachedCyclopediaMarketItems = nil
+local silentMarketEnter = false
+local cyclopediaCatalogPending = false
 
 local MARKET_CATALOG_BATCH_SIZE = 20
 local MARKET_CATEGORY_BATCH_SIZE = 6
@@ -103,8 +106,42 @@ local function resetMarketCatalog()
 	end
 end
 
+local function dismissMarketForCyclopedia(sendLeave)
+	local hadMarketVisible = marketWindow and not marketWindow:isDestroyed() and marketWindow:isVisible()
+	if marketWindow and not marketWindow:isDestroyed() then
+		marketWindow:hide()
+	end
+
+	if hadMarketVisible then
+		g_client.setInputLockWidget(nil)
+	end
+
+	local player = g_game.getLocalPlayer()
+	if player and player.setInMarket then
+		player:setInMarket(false)
+	end
+
+	if sendLeave and g_game.sendMarketLeave then
+		g_game.doThing(false)
+		g_game.sendMarketLeave()
+		g_game.doThing(true)
+	end
+
+	if g_game.resetMarketSession then
+		g_game.resetMarketSession()
+	end
+end
+
+function ensureMarketHiddenForCyclopedia()
+	local wasVisible = marketWindow and not marketWindow:isDestroyed() and marketWindow:isVisible()
+	dismissMarketForCyclopedia(wasVisible)
+end
+
 local function onMarketSessionChange()
 	resetMarketCatalog()
+	cachedCyclopediaMarketItems = nil
+	silentMarketEnter = false
+	cyclopediaCatalogPending = false
 	hide()
 end
 
@@ -139,8 +176,10 @@ local function copyMarketData(itemType, itemId, category, name)
 	marketData.category = category or marketData.category or MarketCategory.Others
 	marketData.name = name or marketData.name or ('Item ' .. itemId)
 	marketData.showAs = marketData.showAs or itemId
-	marketData.requiredLevel = marketData.requiredLevel or 0
-	marketData.restrictVocation = marketData.restrictVocation or {}
+	marketData.requiredLevel = tonumber(marketData.requiredLevel) or 0
+	if type(marketData.restrictVocation) ~= 'table' then
+		marketData.restrictVocation = tonumber(marketData.restrictVocation) or 0
+	end
 	return marketData
 end
 
@@ -268,7 +307,10 @@ function toggle()
 end
 
 function hide()
-	cancelMarketCatalogBuild()
+	resetMarketCatalog()
+	if g_game.resetMarketSession then
+		g_game.resetMarketSession()
+	end
 
 	local wasVisible = marketWindow:isVisible()
 	local mainMarket = marketWindow.contentPanel:getChildById('mainMarket')
@@ -290,6 +332,12 @@ function hide()
 		g_game.sendMarketLeave()
 		g_game.doThing(true)
 	end
+
+	local player = g_game.getLocalPlayer()
+	if player and player.setInMarket then
+		player:setInMarket(false)
+	end
+
   	lastSelectedItem = {}
 	modules.game_console.getConsole():focus()
 end
@@ -300,6 +348,11 @@ function show()
   marketWindow.contentPanel.searchText:focus()
   sortButtons["classFilter"] = -1
   sortButtons["tierFilter"] = 0
+
+  local player = g_game.getLocalPlayer()
+  if player and player.setInMarket then
+    player:setInMarket(true)
+  end
 end
 
 function detailsButton()
@@ -492,6 +545,51 @@ local function finishMarketEnter()
 	marketWindow.contentPanel.category.onChildFocusChange = function(self, selected) onSelectChildCategory(self, selected) end
 end
 
+local function buildCategoryList()
+	categoryList = {}
+	for category = MarketCategory.First, MarketCategory.Last do
+		if marketItems[category] and #marketItems[category] > 0 then
+			categoryList[#categoryList + 1] = {category, getMarketCategoryName(category)}
+		end
+	end
+
+	if #marketItems[MarketCategory.WeaponsAll] > 0 then
+		categoryList[#categoryList + 1] = {MarketCategory.WeaponsAll, 'Weapons: All'}
+	end
+	table.sort(categoryList, function(a, b) return a[2] < b[2] end)
+end
+
+local function renderMarketCategoriesSync(onComplete)
+	local categoryPanel = marketWindow.contentPanel.category
+	categoryPanel:destroyChildren()
+
+	for index, pair in ipairs(categoryList) do
+		local widget = g_ui.createWidget('CategoryItemListLabel', categoryPanel)
+		local color = (index - 1) % 2 == 0 and '#414141' or '#484848'
+		widget:setActionId(pair[1])
+		widget.color = color
+		widget:setId(pair[2])
+		widget:setText(pair[2])
+		widget:setBackgroundColor(color)
+	end
+
+	local firstWidget = categoryPanel:getFirstChild()
+	if firstWidget then
+		categoryPanel:moveChildToIndex(firstWidget, 2)
+	end
+
+	local lastWidget = categoryPanel:getChildById('Weapons: All')
+	if lastWidget then
+		categoryPanel:moveChildToIndex(lastWidget, categoryPanel:getChildCount())
+	end
+
+	marketCatalogBuilding = false
+	marketCatalogReady = true
+	if onComplete then
+		onComplete()
+	end
+end
+
 local function renderMarketCategories(generation, onComplete)
 	local categoryPanel = marketWindow.contentPanel.category
 	categoryPanel:destroyChildren()
@@ -534,7 +632,92 @@ local function renderMarketCategories(generation, onComplete)
 	scheduleMarketCatalogStep(generation, renderBatch)
 end
 
+local function addMarketCatalogTask(task, addedItems)
+	local itemId = tonumber(task.itemId)
+	if not itemId or addedItems[itemId] or itemId == 49870 or itemId == 14258 then
+		return
+	end
+
+	local thingType = task.thingType or g_things.getThingType(itemId, ThingCategoryItem) or g_things.getThingType(itemId)
+	if not thingType then
+		return
+	end
+
+	local category = tonumber(task.category) or MarketCategory.Others
+	marketItems[category] = marketItems[category] or {}
+	local marketData = copyMarketData(thingType, itemId, category, task.name)
+	if task.classification ~= nil then
+		marketData.classification = tonumber(task.classification) or marketData.classification or 0
+	end
+	if task.requiredLevel ~= nil then
+		marketData.requiredLevel = tonumber(task.requiredLevel) or marketData.requiredLevel or 0
+	end
+	if task.restrictVocation ~= nil then
+		marketData.restrictVocation = tonumber(task.restrictVocation) or marketData.restrictVocation or 0
+	end
+
+	local data = {
+		thingType = thingType,
+		marketData = marketData
+	}
+	data.sortName = string.lower(tostring(data.marketData.name or ''))
+	marketItems[category][#marketItems[category] + 1] = data
+	if (category >= MarketCategory.Ammunition and category <= MarketCategory.WandsRods) or
+		category == MarketCategory.FistWeapons then
+		marketItems[MarketCategory.WeaponsAll][#marketItems[MarketCategory.WeaponsAll] + 1] = data
+	end
+	addedItems[itemId] = true
+end
+
+local function hasServerCatalogEntries(serverCatalog)
+	for index = 1, #serverCatalog do
+		local entry = serverCatalog[index]
+		if type(entry) == 'table' and (tonumber(entry[2]) or 0) == 0 then
+			return true
+		end
+	end
+	return false
+end
+
+local function configureListFromServerSync(serverItems, onComplete)
+	cancelMarketCatalogBuild()
+	marketCatalogBuilding = true
+
+	marketItems = {}
+	for category = MarketCategory.First, MarketCategory.WeaponsAll do
+		marketItems[category] = {}
+	end
+
+	local addedItems = {}
+	local tasks = {}
+	for index = 1, #serverItems do
+		local entry = serverItems[index]
+		if type(entry) == 'table' and (tonumber(entry[2]) or 0) == 0 then
+			tasks[#tasks + 1] = {
+				itemId = entry.itemId or entry[1],
+				category = entry.category,
+				name = entry.name,
+				classification = entry.classification,
+				requiredLevel = entry.requiredLevel,
+				restrictVocation = entry.restrictVocation
+			}
+		end
+	end
+
+	for index = 1, #tasks do
+		addMarketCatalogTask(tasks[index], addedItems)
+	end
+
+	buildCategoryList()
+	renderMarketCategoriesSync(onComplete)
+end
+
 function configureList(serverItems, onComplete)
+	if hasServerCatalogEntries(serverItems or {}) then
+		configureListFromServerSync(serverItems, onComplete)
+		return
+	end
+
 	cancelMarketCatalogBuild()
 	marketCatalogBuilding = true
 	local generation = marketCatalogGeneration
@@ -564,17 +747,7 @@ function configureList(serverItems, onComplete)
 	end
 
 	local function finishCatalog()
-		categoryList = {}
-		for category = MarketCategory.First, MarketCategory.Last do
-			if marketItems[category] and #marketItems[category] > 0 then
-				categoryList[#categoryList + 1] = {category, getMarketCategoryName(category)}
-			end
-		end
-
-		if #marketItems[MarketCategory.WeaponsAll] > 0 then
-			categoryList[#categoryList + 1] = {MarketCategory.WeaponsAll, 'Weapons: All'}
-		end
-		table.sort(categoryList, function(a, b) return a[2] < b[2] end)
+		buildCategoryList()
 		renderMarketCategories(generation, onComplete)
 	end
 
@@ -599,26 +772,7 @@ function configureList(serverItems, onComplete)
 	local function processBatch()
 		local batchEnd = math.min(taskIndex + MARKET_CATALOG_BATCH_SIZE - 1, #tasks)
 		for index = taskIndex, batchEnd do
-			local task = tasks[index]
-			local itemId = tonumber(task.itemId)
-			if itemId and not addedItems[itemId] and itemId ~= 49870 and itemId ~= 14258 then
-				local thingType = task.thingType or g_things.getThingType(itemId, ThingCategoryItem) or g_things.getThingType(itemId)
-				if thingType then
-					local category = tonumber(task.category) or MarketCategory.Others
-					marketItems[category] = marketItems[category] or {}
-					local data = {
-						thingType = thingType,
-						marketData = copyMarketData(thingType, itemId, category, task.name)
-					}
-					data.sortName = string.lower(tostring(data.marketData.name or ''))
-					marketItems[category][#marketItems[category] + 1] = data
-					if (category >= MarketCategory.Ammunition and category <= MarketCategory.WandsRods) or
-						category == MarketCategory.FistWeapons then
-						marketItems[MarketCategory.WeaponsAll][#marketItems[MarketCategory.WeaponsAll] + 1] = data
-					end
-					addedItems[itemId] = true
-				end
-			end
+			addMarketCatalogTask(tasks[index], addedItems)
 		end
 
 		taskIndex = batchEnd + 1
@@ -664,7 +818,10 @@ function configureList(serverItems, onComplete)
 				tasks[#tasks + 1] = {
 					itemId = entry.itemId or entry[1],
 					category = entry.category,
-					name = entry.name
+					name = entry.name,
+					classification = entry.classification,
+					requiredLevel = entry.requiredLevel,
+					restrictVocation = entry.restrictVocation
 				}
 			end
 		end
@@ -682,15 +839,83 @@ function configureList(serverItems, onComplete)
 	scheduleMarketCatalogStep(generation, collectServerBatch)
 end
 
+local function updateCachedCyclopediaMarketItems(serverItems)
+	cachedCyclopediaMarketItems = {}
+	if type(serverItems) ~= 'table' then
+		return
+	end
+
+	for index = 1, #serverItems do
+		local entry = serverItems[index]
+		if type(entry) == 'table' and (tonumber(entry[2]) or 0) == 0 then
+			cachedCyclopediaMarketItems[#cachedCyclopediaMarketItems + 1] = {
+				id = entry.itemId or entry[1],
+				category = entry.category,
+				name = entry.name,
+				classification = entry.classification,
+				requiredLevel = entry.requiredLevel,
+				restrictVocation = entry.restrictVocation
+			}
+		end
+	end
+end
+
+local function notifyCyclopediaItemsUpdated()
+	scheduleEvent(function()
+		if modules.game_cyclopedia and modules.game_cyclopedia.CyclopediaItems and modules.game_cyclopedia.CyclopediaItems.onMarketItemsUpdated then
+			modules.game_cyclopedia.CyclopediaItems.onMarketItemsUpdated()
+		end
+	end, 0)
+end
+
+function getCachedCustomMarketItems()
+	if cachedCyclopediaMarketItems and #cachedCyclopediaMarketItems > 0 then
+		return cachedCyclopediaMarketItems
+	end
+	return nil
+end
+
+function requestMarketItemsForCyclopedia()
+	if getCachedCustomMarketItems() then
+		return true
+	end
+
+	if not g_game.isOnline() or not g_game.openMarket then
+		return false
+	end
+
+	if cyclopediaCatalogPending then
+		return false
+	end
+
+	cyclopediaCatalogPending = true
+	silentMarketEnter = true
+	g_game.openMarket(true)
+	return false
+end
+
 -- Main Window
 function onMarketEnter(offerCount, items)
 	depotLockerItems = items
+	updateCachedCyclopediaMarketItems(items)
 
-	if marketCatalogReady then
-		finishMarketEnter()
-	elseif not marketCatalogBuilding then
-		configureList(items, finishMarketEnter)
+	if silentMarketEnter or cyclopediaCatalogPending then
+		silentMarketEnter = false
+		cyclopediaCatalogPending = false
+		dismissMarketForCyclopedia(true)
+		notifyCyclopediaItemsUpdated()
+		return
 	end
+
+	cancelMarketCatalogBuild()
+	marketCatalogReady = false
+
+	if marketWindow and not marketWindow:isDestroyed() and not marketWindow:isVisible() then
+		show()
+	end
+
+	configureList(items, finishMarketEnter)
+	notifyCyclopediaItemsUpdated()
 end
 
 function onMarketBrowse(itemID, tier, buyList, sellList)
@@ -1948,7 +2173,6 @@ function checkSortMarketOptions(itemData)
 	end
 
 	local playerLevel = player:getLevel()
-	local playerVocation = translateWheelVocation(player:getVocation())
 
 	if sortButtons["levelButton"] then
 		if itemData.marketData.requiredLevel > playerLevel then
@@ -1958,8 +2182,19 @@ function checkSortMarketOptions(itemData)
 
 	if sortButtons["vocButton"] then
 		local itemVocation = itemData.marketData.restrictVocation
-		if #itemVocation > 0 and not table.contains(itemVocation, playerVocation) then
-			return false
+		if type(itemVocation) == 'table' then
+			local playerVocation = translateWheelVocation(player:getVocation())
+			if #itemVocation > 0 and not table.contains(itemVocation, playerVocation) then
+				return false
+			end
+		else
+			itemVocation = tonumber(itemVocation) or 0
+			if itemVocation > 0 then
+				local vocBitMask = getMarketVocationBitMask(player:getVocation())
+				if vocBitMask > 0 and not Bit.hasBit(itemVocation, vocBitMask) then
+					return false
+				end
+			end
 		end
 	end
 
@@ -1975,13 +2210,19 @@ function checkSortMarketOptions(itemData)
 		end
 	end
 
+	local classification = itemData.marketData and tonumber(itemData.marketData.classification)
+	if classification == nil and itemData.thingType then
+		classification = itemData.thingType:getClassification()
+	end
+	classification = classification or 0
+
 	if sortButtons["classFilter"] ~= -1 then
-		if itemData.thingType:getClassification() ~= sortButtons["classFilter"] then
+		if classification ~= sortButtons["classFilter"] then
 			return false
 		end
 	end
 
-	if sortButtons["tierFilter"] > 0 and itemData.thingType:getClassification() == 0 then
+	if sortButtons["tierFilter"] > 0 and classification == 0 then
 		return false
 	end
 
@@ -2032,7 +2273,7 @@ function onMarketDetail(itemID, tier, details, purchase, sale)
 		end
 
 		local widget = g_ui.createWidget('DatailsLabel', marketWindow.contentPanel.detailsMarket.detailsList)
-		widget:setText(MarketDetailNames[i + 1] .. str)
+		widget:setText((MarketDetailNames[i] or ("Detail " .. i .. ": ")) .. str)
 		:: continue ::
 	end
 
@@ -2071,8 +2312,7 @@ function onMarketDetail(itemID, tier, details, purchase, sale)
 end
 
 function getItemNameById(itemId)
-  for c = MarketCategory.First, MarketCategory.WeaponsAll do
-		local marketItem = marketItems[c]
+	for _, marketItem in pairs(marketItems) do
 		if marketItem then
 			for _, data in pairs(marketItem) do
 				if data.thingType:getId() == itemId then
@@ -2081,7 +2321,16 @@ function getItemNameById(itemId)
 			end
 		end
 	end
-  return ''
+
+	local thingType = g_things.getThingType(itemId, ThingCategoryItem)
+	if thingType then
+		local marketData = thingType:getMarketData()
+		if marketData and marketData.name and marketData.name ~= '' then
+			return marketData.name
+		end
+	end
+
+	return tostring(itemId)
 end
 
 function onRedirect(item)
