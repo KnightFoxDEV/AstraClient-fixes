@@ -592,6 +592,7 @@ local function renderMarketCategories(generation, onComplete)
 		end
 
 		onComplete()
+		categoryPanel:setEnabled(true)
 	end
 
 	scheduleMarketCatalogStep(generation, renderBatch)
@@ -638,6 +639,10 @@ end
 function configureList(serverItems, onComplete)
 	cancelMarketCatalogBuild()
 	local generation = marketCatalogGeneration
+	local categoryPanel = marketWindow.contentPanel.category
+	categoryPanel.onChildFocusChange = nil
+	categoryPanel:setEnabled(false)
+	categoryPanel:destroyChildren()
 
 	marketItems = {}
 	marketItemNames = {}
