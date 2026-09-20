@@ -142,7 +142,9 @@ local function readPriceTable(msg)
       error("Malformed Forge price table tier count")
     end
     for j = 1, tierCount do
-      tierPrices[msg:getU8()] = msg:getU64()
+      local tier = msg:getU8()
+      local price = msg:getU64()
+      tierPrices[tier] = price
     end
     result[classification] = { [2] = tierPrices }
   end
