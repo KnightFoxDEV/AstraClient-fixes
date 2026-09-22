@@ -536,7 +536,11 @@ return {
                 gameMapPanel:setCursorAnimations(value and not GameOptions:getOption('nativeMouseCursor'))
             end
             return true
-        end,
+		end,
+	},
+
+	disableMeleeAttackAnimations = {
+		value = false,
 	},
 
 	autoChaseOverride = {
@@ -1844,7 +1848,7 @@ return {
 	},
 
 	showCooldown = {
-		value = true,
+		value = false,
         apply = function(value)
             modules.game_cooldown.toggleVisible(value)
             return true
