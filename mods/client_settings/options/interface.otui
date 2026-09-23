@@ -169,7 +169,7 @@ InterfaceWindow < Panel
       @onSetup: |
         local value = modules.client_settings.getOption('disableNpcDialogWindow')
         self:setChecked(value)
-   
+
     UIWidget
       size: 12 12
       anchors.top: parent.top
@@ -178,7 +178,7 @@ InterfaceWindow < Panel
       margin-top: 5
       image-source: /images/skin/show-gui-help-grey
       !tooltip: tr('Hides the custom NPC dialog window and keeps NPC messages in the standard chat.')
-  
+
   FlatPanel
     size: 505 22
     anchors.top: prev.bottom
@@ -206,7 +206,6 @@ InterfaceWindow < Panel
       @onSetup: |
         local value = modules.client_settings.getOption('showCooldown')
         self:setChecked(value)
-
 
     UIWidget
       size: 12 12
