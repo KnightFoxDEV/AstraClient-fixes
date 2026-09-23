@@ -543,6 +543,16 @@ return {
 		value = false,
 	},
 
+    disableNpcDialogWindow = {
+		value = false,
+		apply = function(value)
+			if modules.game_npctrade and modules.game_npctrade.setNpcDialogWindowEnabled then
+				modules.game_npctrade.setNpcDialogWindowEnabled(not value)
+			end
+			return true
+		end,
+	},
+
 	autoChaseOverride = {
 		value = true,
 	},
